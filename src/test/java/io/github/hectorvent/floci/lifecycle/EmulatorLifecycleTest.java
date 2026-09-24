@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheMemcachedService;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
@@ -68,6 +69,8 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.StorageConfig storageConfig;
     @Mock private EmulatorConfig.ServicesConfig servicesConfig;
     @Mock private EmulatorConfig.Ec2ServiceConfig ec2ServiceConfig;
+    @Mock private EmulatorConfig.EcsServiceConfig ecsServiceConfig;
+    @Mock private EmulatorConfig.EcsTaskRoleCredentialsConfig ecsTaskRoleCredentialsConfig;
     @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
@@ -98,6 +101,7 @@ class EmulatorLifecycleTest {
     @Mock private DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
+    @Mock private EcsTaskRoleCredentialsServer ecsTaskRoleCredentialsServer;
     @Mock private EcrRegistryManager ecrRegistryManager;
     @Mock private FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
@@ -114,6 +118,9 @@ class EmulatorLifecycleTest {
     void setUp() {
         Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
         Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
+        Mockito.lenient().when(servicesConfig.ecs()).thenReturn(ecsServiceConfig);
+        Mockito.lenient().when(ecsServiceConfig.taskRoleCredentials()).thenReturn(ecsTaskRoleCredentialsConfig);
+        Mockito.lenient().when(ecsTaskRoleCredentialsConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(ec2ServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.elbv2()).thenReturn(elbv2ServiceConfig);
         Mockito.lenient().when(elbv2ServiceConfig.enabled()).thenReturn(false);
@@ -141,7 +148,7 @@ class EmulatorLifecycleTest {
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState,
+                pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, containerTeardowns, persistentPathValidator);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(java.util.Collections.emptyIterator());
@@ -664,5 +671,47 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
         verify(ec2MetadataServer, never()).start();
+    }
+
+    @Test
+    @DisplayName("Should start and stop the ECS task-role credentials server when enabled")
+    void shouldStartAndStopEcsTaskRoleCredentialsServerWhenEnabled() {
+        stubStorageConfig();
+        when(ecsTaskRoleCredentialsConfig.enabled()).thenReturn(true);
+        when(ecsTaskRoleCredentialsServer.start()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        verify(ecsTaskRoleCredentialsServer).start();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+        verify(ecsTaskRoleCredentialsServer).stop();
+    }
+
+    @Test
+    @DisplayName("Should not start the ECS task-role credentials server when disabled")
+    void shouldNotStartEcsTaskRoleCredentialsServerWhenDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+        verify(ecsTaskRoleCredentialsServer, never()).start();
+
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+        verify(ecsTaskRoleCredentialsServer, never()).stop();
+    }
+
+    @Test
+    @DisplayName("Should sweep orphaned ECS task-role sessions on startup")
+    void shouldSweepOrphanedEcsTaskRoleSessionsOnStartup() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(iamService).sweepOrphanedEcsTaskRoleSessions();
     }
 }
