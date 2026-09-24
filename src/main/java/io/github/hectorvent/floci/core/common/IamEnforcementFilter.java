@@ -167,7 +167,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // Normalise signing aliases (s3express → s3) before anything keyed by scope runs:
         // action rules, ARN building and condition keys all match the canonical name, so an
         // alias would resolve to no action and be allowed through without any policy check.
-        String credentialScope = catalog.canonicalCredentialScope(rawScope);
+        String credentialScope = servingCredentialScope(catalog.canonicalCredentialScope(rawScope), ctx);
 
         String action = actionRegistry.resolve(credentialScope, ctx);
         if (action == null) {
@@ -312,6 +312,40 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /**
+     * The scope of the service that will actually serve this request, which is not always the one
+     * the caller signed for. Everything keyed by scope (the action, its ARNs, its condition keys)
+     * has to describe the service that runs, or a policy naming that service never matches.
+     *
+     * <p>Only the claim decides this, never {@code X-Amz-Target} read directly: the target routes
+     * a request solely under the conditions {@link ProtocolClaimer} applies, and reading it here
+     * would let a header attached to, say, an S3 request move the authorization to another
+     * service while S3 still served it. {@link WireProtocol#AWS_QUERY} is excluded because its
+     * claim takes the service from the credential scope, so it would only restate the caller.
+     */
+    private String servingCredentialScope(String claimedScope, ContainerRequestContext ctx) {
+        if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null
+                && claim.protocol() != WireProtocol.AWS_QUERY) {
+            return iamServiceScope(claim.service(), claimedScope);
+        }
+        return claimedScope;
+    }
+
+    /** The descriptor's own scope, keeping {@code claimedScope} when the descriptor accepts it. */
+    private String iamServiceScope(ServiceDescriptor descriptor, String claimedScope) {
+        if (descriptor.credentialScopes().contains(claimedScope)) {
+            return claimedScope;
+        }
+        // Sorted, because credentialScopes is a Set.of whose iteration order changes per JVM run
+        // and several services declare two.
+        return descriptor.credentialScopes().stream()
+                .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
+                .sorted()
+                .findFirst()
+                .orElse(descriptor.externalKey());
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */

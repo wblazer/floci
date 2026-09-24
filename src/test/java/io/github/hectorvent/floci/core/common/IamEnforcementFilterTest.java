@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -34,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -140,6 +142,96 @@ class IamEnforcementFilterTest {
         filter.filter(containerRequest);
 
         verify(arnBuilder).buildResources("lambda", containerRequest, "us-east-1", "222233334444");
+    }
+
+    @Test
+    void jsonProtocolActionComesFromTheTargetNotTheSignedScope() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        // Signed for lambda, but X-Amz-Target sends it to DynamoDB, which is where it will run.
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/lambda/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.PutItem");
+        stubClaim(containerRequest, WireProtocol.AWS_JSON_1_0, dynamoDbDescriptor());
+        when(iamService.resolveCallerContext("AKIAUSER"))
+                .thenReturn(CallerContext.of(List.of("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Deny","Action":"dynamodb:*","Resource":"*"}]}""")));
+
+        newFilter().filter(containerRequest);
+
+        // The scope handed to every scope-keyed lookup must be dynamodb, not the signed lambda.
+        verify(actionRegistry).resolve(eq("dynamodb"), eq(containerRequest));
+    }
+
+    @Test
+    void aScopeTheTargetsServiceAcceptsIsLeftAlone() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.PutItem");
+        stubClaim(containerRequest, WireProtocol.AWS_JSON_1_0, dynamoDbDescriptor());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).resolve(eq("dynamodb"), eq(containerRequest));
+    }
+
+    private static void stubClaim(ContainerRequestContext ctx, WireProtocol protocol,
+                                  ServiceDescriptor descriptor) {
+        when(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(protocol, descriptor, null, null));
+    }
+
+    private static ServiceDescriptor dynamoDbDescriptor() {
+        return new ServiceDescriptor("dynamodb", "dynamodb", true, true, "dynamodb", "memory", 0L, null,
+                ServiceProtocol.JSON, Set.of(ServiceProtocol.JSON), Set.of("DynamoDB_20120810."),
+                Set.of("dynamodb"), Set.of(), Set.of());
+    }
+
+    @Test
+    void aTargetHeaderOnARequestThatIsNotDispatchedOnItDoesNotMoveTheAuthorization() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        // An S3 REST delete carrying a DynamoDB target. JAX-RS routes it to S3 whatever the header
+        // says, so the header must not decide which service gets authorized.
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.DescribeTable");
+        // The target does resolve to DynamoDB; what must stop it is that this request was never
+        // claimed for target dispatch, so the header is not what routes it.
+        lenient().when(catalog.matchTarget("DynamoDB_20120810.DescribeTable")).thenReturn(Optional.of(
+                new ServiceCatalog.TargetMatch(dynamoDbDescriptor(), "DynamoDB_20120810.", "DescribeTable")));
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY)).thenReturn(ProtocolClaim.rest());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).resolve(eq("s3"), eq(containerRequest));
+    }
+
+    @Test
+    void aQueryClaimNeverOverridesTheScopeItWasBuiltFrom() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260629/us-east-1/lambda/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        stubClaim(containerRequest, WireProtocol.AWS_QUERY, dynamoDbDescriptor());
+        when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(actionRegistry).resolve(eq("lambda"), eq(containerRequest));
     }
 
     @Test
