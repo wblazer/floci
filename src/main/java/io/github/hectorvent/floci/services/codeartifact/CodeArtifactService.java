@@ -71,7 +71,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
